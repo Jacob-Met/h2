@@ -871,13 +871,17 @@ class H2Connection:
         # Check we can open the stream.
         if stream_id not in self.streams:
             self._refuse_new_stream_while_draining(stream_id)
-            max_open_streams = self.remote_settings.max_concurrent_streams
-            value = self.open_outbound_streams # take a copy due to the property accessor having side affects
-            if (value + 1) > max_open_streams:
-                msg = f"Max outbound streams is {max_open_streams}, {value} open"
-                raise TooManyStreamsError(msg)
+            if stream_id not in self._closed_streams:
+                max_open_streams = self.remote_settings.max_concurrent_streams
+                value = self.open_outbound_streams # property also retires closed streams
+                if (value + 1) > max_open_streams:
+                    msg = f"Max outbound streams is {max_open_streams}, {value} open"
+                    raise TooManyStreamsError(msg)
 
         self.state_machine.process_input(ConnectionInputs.SEND_HEADERS)
+        if stream_id in self._closed_streams:
+            raise StreamClosedError(stream_id)
+
         stream = self._get_or_create_stream(
             stream_id, AllowedStreamIDs(self.config.client_side),
         )
