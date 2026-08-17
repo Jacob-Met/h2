@@ -14,7 +14,9 @@ dev
 
 **Bugfixes**
 
--
+- Ignore leftover frames received after the connection has closed, instead of
+  raising protocol errors. Further GOAWAY frames are still processed.
+
 
 4.4.1 (2026-08-03)
 ------------------
