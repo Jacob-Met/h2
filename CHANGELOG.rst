@@ -11,9 +11,6 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
-
-**API Changes (Backward Compatible)**
-
 - Support graceful shutdown by the remote peer (RFC 9113, Section 6.8). After
   a GOAWAY with error code ``NO_ERROR``, the connection drains: its state is
   ``CLOSED`` and no new local streams may be opened, but frames for open
@@ -30,7 +27,8 @@ dev
 
 - Ignore leftover frames received after the connection has closed, instead of
   raising protocol errors. Further GOAWAY frames are still processed.
-
+- Preserve receive flow-control window state when a local window increment
+  is rejected for exceeding the maximum.
 
 4.4.1 (2026-08-03)
 ------------------
