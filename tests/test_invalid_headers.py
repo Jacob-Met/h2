@@ -977,3 +977,91 @@ class TestOversizedHeaders:
             last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [b"", b"20", b"200x", b"2a0", b"099", b"600", b"999"],
+)
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
+def test_invalid_status_pseudo_header_rejected(
+    frame_factory, status, direction,
+) -> None:
+    """HTTP/2 :status must be a valid three-digit HTTP status code."""
+    request_headers = [
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"example.com"),
+        (b":path", b"/"),
+    ]
+
+    if direction == "inbound":
+        conn = h2.connection.H2Connection()
+        conn.initiate_connection()
+        conn.send_headers(1, request_headers, end_stream=True)
+        response = frame_factory.build_headers_frame(
+            headers=[(b":status", status)],
+            flags=["END_STREAM"],
+        )
+        with pytest.raises(h2.exceptions.ProtocolError, match="Invalid :status"):
+            conn.receive_data(response.serialize())
+    else:
+        conn = h2.connection.H2Connection(
+            h2.config.H2Configuration(client_side=False),
+        )
+        conn.initiate_connection()
+        conn.receive_data(frame_factory.preamble())
+        request = frame_factory.build_headers_frame(
+            headers=request_headers, flags=["END_STREAM"],
+        )
+        conn.receive_data(request.serialize())
+        with pytest.raises(h2.exceptions.ProtocolError, match="Invalid :status"):
+            conn.send_headers(1, [(b":status", status)], end_stream=True)
+
+
+@pytest.mark.parametrize("status", [b"100", b"199", b"200", b"471", b"599"])
+def test_valid_status_pseudo_header_accepted(frame_factory, status) -> None:
+    """Unknown but valid codes are accepted across all five HTTP status classes."""
+    conn = h2.connection.H2Connection()
+    conn.initiate_connection()
+    conn.send_headers(
+        1,
+        [
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"example.com"),
+            (b":path", b"/"),
+        ],
+        end_stream=True,
+    )
+    response = frame_factory.build_headers_frame(
+        headers=[(b":status", status)],
+        flags=[] if status.startswith(b"1") else ["END_STREAM"],
+    )
+    events = conn.receive_data(response.serialize())
+    expected = (
+        h2.events.InformationalResponseReceived
+        if status.startswith(b"1") else h2.events.ResponseReceived
+    )
+    assert any(isinstance(event, expected) for event in events)
+
+
+def test_valid_status_pseudo_header_is_forbidden_in_request(frame_factory) -> None:
+    """Valid response-only fields remain forbidden on inbound requests."""
+    conn = h2.connection.H2Connection(
+        h2.config.H2Configuration(client_side=False),
+    )
+    conn.initiate_connection()
+    conn.receive_data(frame_factory.preamble())
+    request = frame_factory.build_headers_frame(
+        headers=[
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"example.com"),
+            (b":path", b"/"),
+            (b":status", b"200"),
+        ],
+        flags=["END_STREAM"],
+    )
+    with pytest.raises(h2.exceptions.ProtocolError, match="response-only headers"):
+        conn.receive_data(request.serialize())
