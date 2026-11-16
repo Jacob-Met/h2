@@ -526,3 +526,68 @@ class TestNoBodyContentLengths:
 
         assert exp.value.expected_length == 15
         assert exp.value.actual_length == 0
+
+    @pytest.mark.parametrize(
+        ("request_method", "status"),
+        [(b"GET", b"204"), (b"GET", b"304"), (b"HEAD", b"200")],
+    )
+    @pytest.mark.parametrize(
+        ("content_lengths", "error"),
+        [
+            ([b"not-a-number"], "Invalid content-length header"),
+            ([b"42", b"43"], "Conflicting content-length headers"),
+        ],
+    )
+    def test_no_body_response_still_validates_content_length_fields(
+        self,
+        frame_factory,
+        request_method,
+        status,
+        content_lengths,
+        error,
+    ) -> None:
+        """
+        Exempt responses have no body, but their content-length fields still
+        need valid syntax and non-conflicting values.
+        """
+        c = h2.connection.H2Connection()
+        c.initiate_connection()
+        request_headers = [
+            (name, request_method if name == b":method" else value)
+            for name, value in self.request_headers
+        ]
+        c.send_headers(1, request_headers, end_stream=True)
+        response = frame_factory.build_headers_frame(
+            headers=[
+                (b":status", status),
+                *((b"content-length", value) for value in content_lengths),
+            ],
+            flags=["END_STREAM"],
+        )
+        with pytest.raises(h2.exceptions.ProtocolError, match=error):
+            c.receive_data(response.serialize())
+
+    def test_head_response_accepts_valid_nonzero_content_length(
+        self,
+        frame_factory,
+    ) -> None:
+        c = h2.connection.H2Connection()
+        c.initiate_connection()
+        headers = [
+            (name, b"HEAD" if name == b":method" else value)
+            for name, value in self.request_headers
+        ]
+        c.send_headers(1, headers, end_stream=True)
+        response = frame_factory.build_headers_frame(
+            headers=[
+                (b":status", b"200"),
+                (b"content-length", b"1234"),
+                (b"content-length", b"1234"),
+            ],
+            flags=["END_STREAM"],
+        )
+        events = c.receive_data(response.serialize())
+        assert [type(event) for event in events] == [
+            h2.events.ResponseReceived,
+            h2.events.StreamEnded,
+        ]
