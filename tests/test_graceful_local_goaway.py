@@ -198,3 +198,21 @@ def test_error_goaway_cannot_expand_previous_graceful_boundary() -> None:
             error_code=ErrorCodes.INTERNAL_ERROR,
             last_stream_id=1,
         )
+
+
+def test_graceful_goaway_after_terminal_close_is_not_reopened() -> None:
+    """A terminally closed connection must not reopen when asked to drain."""
+    _, server = connected_pair()
+    server.close_connection()
+    with pytest.raises(ProtocolError, match="terminated"):
+        server.close_connection(graceful=True)
+
+
+def test_refused_reset_after_local_goaway_is_ignored() -> None:
+    """RST_STREAM for a declined peer stream is harmless after GOAWAY."""
+    client, server = connected_pair()
+    client.send_headers(3, REQUEST)
+    client.reset_stream(3)
+    server.close_connection(graceful=True, last_stream_id=1)
+    assert server.receive_data(client.data_to_send()) == []
+    assert 3 not in server.streams

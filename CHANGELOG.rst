@@ -11,6 +11,8 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Emit per-open-stream WindowUpdated events when peer settings increase stream
+  send windows, so blocked senders can resume without special settings logic.
 - Support graceful shutdown by the remote peer (RFC 9113, Section 6.8). After
   a GOAWAY with error code ``NO_ERROR``, the connection drains: its state is
   ``CLOSED`` and no new local streams may be opened, but frames for open

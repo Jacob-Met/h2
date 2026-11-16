@@ -1539,7 +1539,7 @@ class H2Connection:
         """
         self._data_to_send = bytearray()
 
-    def _acknowledge_settings(self) -> list[Frame]:
+    def _acknowledge_settings(self) -> tuple[list[Frame], list[WindowUpdated]]:
         """
         Acknowledge settings that have been received.
 
@@ -1552,10 +1552,11 @@ class H2Connection:
         self.state_machine.process_input(ConnectionInputs.SEND_SETTINGS)
 
         changes = self.remote_settings.acknowledge()
+        window_events: list[WindowUpdated] = []
 
         if SettingCodes.INITIAL_WINDOW_SIZE in changes:
             setting = changes[SettingCodes.INITIAL_WINDOW_SIZE]
-            self._flow_control_change_from_settings(
+            window_events = self._flow_control_change_from_settings(
                 setting.original_value,
                 setting.new_value,
             )
@@ -1574,9 +1575,9 @@ class H2Connection:
 
         f = SettingsFrame(0)
         f.flags.add("ACK")
-        return [f]
+        return [f], window_events
 
-    def _flow_control_change_from_settings(self, old_value: int | None, new_value: int) -> None:
+    def _flow_control_change_from_settings(self, old_value: int | None, new_value: int) -> list[WindowUpdated]:
         """
         Update flow control windows in response to a change in the value of
         SETTINGS_INITIAL_WINDOW_SIZE.
@@ -1587,12 +1588,17 @@ class H2Connection:
         RFC 7540.
         """
         delta = new_value - (old_value or 0)
+        window_events: list[WindowUpdated] = []
 
         for stream in self.streams.values():
             stream.outbound_flow_control_window = guard_increment_window(
                 stream.outbound_flow_control_window,
                 delta,
             )
+            if delta > 0 and STREAM_OPEN[stream.state_machine.state]:
+                window_events.append(WindowUpdated(stream_id=stream.stream_id, delta=delta))
+
+        return window_events
 
     def _inbound_flow_control_change_from_settings(self, old_value: int | None, new_value: int) -> None:
         """
@@ -1938,9 +1944,9 @@ class H2Connection:
                 self.remote_settings, frame.settings,
             ),
         )
-        frames = self._acknowledge_settings()
+        frames, window_events = self._acknowledge_settings()
 
-        return frames, events
+        return frames, events + window_events
 
     def _receive_window_update_frame(self, frame: WindowUpdateFrame) -> tuple[list[Frame], list[Event]]:
         """
