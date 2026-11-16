@@ -61,7 +61,7 @@ from .exceptions import (
 )
 from .frame_buffer import FrameBuffer
 from .settings import ChangedSetting, SettingCodes, Settings
-from .stream import H2Stream, StreamClosedBy
+from .stream import STREAM_OPEN, H2Stream, StreamClosedBy, StreamState
 from .utilities import SizeLimitDict, guard_increment_window
 from .windows import WindowManager
 
@@ -325,6 +325,8 @@ class H2Connection:
     def __init__(self, config: H2Configuration | None = None) -> None:
         self.state_machine = H2ConnectionStateMachine()
         self.streams: dict[int, H2Stream] = {}
+        self._open_stream_counts = [0, 0]
+        self._pending_closed_streams: list[int] = []
         self.highest_inbound_stream_id = 0
         self.highest_outbound_stream_id = 0
         self.encoder = Encoder()
@@ -423,26 +425,20 @@ class H2Connection:
         self._data_to_send += b"".join(f.serialize() for f in frames)
         assert all(f.body_len <= self.max_outbound_frame_size for f in frames)
 
+    def _stream_state_changed(self, stream_id: int, old: StreamState, new: StreamState) -> None:
+        """Keep the live-stream count in sync with stream state transitions."""
+        if STREAM_OPEN[old] != STREAM_OPEN[new]:
+            self._open_stream_counts[stream_id % 2] += 1 if STREAM_OPEN[new] else -1
+        if new == StreamState.CLOSED:
+            self._pending_closed_streams.append(stream_id)
+
     def _open_streams(self, remainder: int) -> int:
-        """
-        A common method of counting number of open streams. Returns the number
-        of streams that are open *and* that have (stream ID % 2) == remainder.
-        While it iterates, also deletes any closed streams.
-        """
-        count = 0
-        to_delete = []
-
-        for stream_id, stream in self.streams.items():
-            if stream.open and (stream_id % 2 == remainder):
-                count += 1
-            elif stream.closed:
-                to_delete.append(stream_id)
-
-        for stream_id in to_delete:
+        """Count open streams and retire streams closed since the last check."""
+        for stream_id in self._pending_closed_streams:
             stream = self.streams.pop(stream_id)
             self._closed_streams[stream_id] = stream.closed_by
-
-        return count
+        self._pending_closed_streams.clear()
+        return self._open_stream_counts[remainder]
 
     @property
     def open_outbound_streams(self) -> int:
@@ -505,6 +501,7 @@ class H2Connection:
         self.config.logger.debug("Stream ID %d created", stream_id)
         s.max_outbound_frame_size = self.max_outbound_frame_size
 
+        s.state_machine.on_state_change = self._stream_state_changed
         self.streams[stream_id] = s
         self.config.logger.debug("Current streams: %s", self.streams.keys())
 

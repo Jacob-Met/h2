@@ -130,6 +130,7 @@ class H2StreamStateMachine:
 
         # How the stream was closed. One of StreamClosedBy.
         self.stream_closed_by: StreamClosedBy | None = None
+        self.on_state_change: Callable[[int, StreamState, StreamState], None] | None = None
 
     def process_input(self, input_: StreamInputs) -> list[Event]:
         """
@@ -139,27 +140,32 @@ class H2StreamStateMachine:
             msg = "Input must be an instance of StreamInputs"
             raise ValueError(msg)  # noqa: TRY004
 
+        initial_state = self.state
         try:
-            func, target_state = _transitions[(self.state, input_)]
-        except KeyError as err:
-            old_state = self.state
-            self.state = StreamState.CLOSED
-            msg = f"Invalid input {input_} in state {old_state}"
-            raise ProtocolError(msg) from err
-        else:
-            previous_state = self.state
-            self.state = target_state
-            if func is not None:
-                try:
-                    return func(self, previous_state)
-                except ProtocolError:
-                    self.state = StreamState.CLOSED
-                    raise
-                except AssertionError as err:  # pragma: no cover
-                    self.state = StreamState.CLOSED
-                    raise ProtocolError(err) from err
+            try:
+                func, target_state = _transitions[(self.state, input_)]
+            except KeyError as err:
+                old_state = self.state
+                self.state = StreamState.CLOSED
+                msg = f"Invalid input {input_} in state {old_state}"
+                raise ProtocolError(msg) from err
+            else:
+                previous_state = self.state
+                self.state = target_state
+                if func is not None:
+                    try:
+                        return func(self, previous_state)
+                    except ProtocolError:
+                        self.state = StreamState.CLOSED
+                        raise
+                    except AssertionError as err:  # pragma: no cover
+                        self.state = StreamState.CLOSED
+                        raise ProtocolError(err) from err
 
-            return []
+                return []
+        finally:
+            if self.on_state_change is not None and self.state != initial_state:
+                self.on_state_change(self.stream_id, initial_state, self.state)
 
     def request_sent(self, previous_state: StreamState) -> list[Event]:
         """
