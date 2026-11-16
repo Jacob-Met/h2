@@ -1375,20 +1375,14 @@ class H2Stream:
         _expected_content_length field from it. It's not an error for no
         Content-Length header to be present.
         """
-        if self.request_method == b"HEAD":
-            self._expected_content_length = 0
-            return
-
+        no_content = self.request_method == b"HEAD"
         content_length = None
 
         for n, v in headers:
             if n == b":status" and v in (b"204", b"304"):
-                # RFC 9113 § 8.1.1 defines 204 and 304 responses as having no
-                # content, so a non-zero content-length is allowed there just
-                # as it is for a response to HEAD (RFC 9110 § 8.6). Expecting
-                # zero also makes non-empty DATA an error, matching HEAD.
-                self._expected_content_length = 0
-                return
+                # These responses have no content, but their content-length
+                # values must still be well-formed and non-conflicting.
+                no_content = True
             if n == b"content-length":
                 if not v.isdigit():
                     # https://www.rfc-editor.org/rfc/rfc9110.html#name-content-length
@@ -1407,7 +1401,9 @@ class H2Stream:
                     msg = f"Conflicting content-length headers: {content_length} and {parsed_content_length}"
                     raise ProtocolError(msg)
 
-        self._expected_content_length = content_length
+        # HEAD, 204 and 304 may declare a non-zero representation length
+        # without sending any content. Non-empty DATA is still invalid.
+        self._expected_content_length = 0 if no_content else content_length
 
     def _track_content_length(self, length: int, end_stream: bool) -> None:
         """
