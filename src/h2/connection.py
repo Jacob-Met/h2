@@ -385,6 +385,7 @@ class H2Connection:
     def __init__(self, config: H2Configuration | None = None) -> None:
         self.state_machine = H2ConnectionStateMachine()
         self.streams: dict[int, H2Stream] = {}
+        self._local_goaway_last_stream_id: int | None = None
         self.highest_inbound_stream_id = 0
         self.highest_outbound_stream_id = 0
         self.encoder = Encoder()
@@ -679,7 +680,7 @@ class H2Connection:
         """
         if self.state_machine.draining:
             msg = (
-                f"Cannot open stream {stream_id}: the remote peer sent GOAWAY, "
+                f"Cannot open stream {stream_id}: GOAWAY was sent or received, "
                 "so no new streams may be opened"
             )
             raise ProtocolError(msg)
@@ -1155,9 +1156,13 @@ class H2Connection:
     def close_connection(self,
                          error_code: ErrorCodes | int = 0,
                          additional_data: bytes | None = None,
-                         last_stream_id: int | None = None) -> None:
+                         last_stream_id: int | None = None,
+                         graceful: bool = False) -> None:
         """
         Close a connection, emitting a GOAWAY frame.
+
+        With graceful=True, existing streams can finish after the GOAWAY;
+        no new local streams may be started.
 
         .. versionchanged:: 2.4.0
            Added ``additional_data`` and ``last_stream_id`` arguments.
@@ -1168,17 +1173,37 @@ class H2Connection:
             a reason for closing the connection. Must be a bytestring.
         :param last_stream_id: (optional) The last stream which was processed
             by the sender. Defaults to ``highest_inbound_stream_id``.
+        :param graceful: (optional) Whether to preserve existing streams after
+            sending GOAWAY(NO_ERROR). Defaults to immediate shutdown.
         :returns: Nothing
         """
+        if graceful and error_code != ErrorCodes.NO_ERROR:
+            msg = "Graceful GOAWAY requires NO_ERROR"
+            raise ValueError(msg)
+
+        if last_stream_id is None:
+            last_stream_id = self.highest_inbound_stream_id
+        if (
+            graceful
+            and self._local_goaway_last_stream_id is not None
+            and last_stream_id > self._local_goaway_last_stream_id
+        ):
+            msg = "Last stream ID cannot increase during graceful shutdown"
+            raise ValueError(msg)
+
+        open_state = self.state_machine._draining_state
+        if open_state is None:
+            open_state = self.state_machine.state
+        if graceful and open_state is ConnectionState.CLOSED:
+            msg = "Cannot gracefully close a terminated connection"
+            raise ProtocolError(msg)
+
         self.config.logger.debug("Close connection")
         self.state_machine.process_input(ConnectionInputs.SEND_GOAWAY)
 
         # Additional_data must be bytes
         if additional_data is not None:
             assert isinstance(additional_data, bytes)
-
-        if last_stream_id is None:
-            last_stream_id = self.highest_inbound_stream_id
 
         f = GoAwayFrame(
             stream_id=0,
@@ -1187,6 +1212,9 @@ class H2Connection:
             additional_data=(additional_data or b""),
         )
         self._prepare_for_sending([f])
+        if graceful:
+            self._local_goaway_last_stream_id = last_stream_id
+            self.state_machine._start_draining(open_state)
 
     def update_settings(self, new_settings: dict[SettingCodes | int, int]) -> None:
         """
@@ -1609,6 +1637,39 @@ class H2Connection:
 
         return events
 
+    def _ignore_frame_after_local_goaway(self, frame: Frame) -> bool:
+        """Discard refused peer streams while preserving connection state."""
+        boundary = self._local_goaway_last_stream_id
+        if boundary is None:
+            return False
+
+        refused = (
+            frame.stream_id > boundary
+            and frame.stream_id != 0
+            and not self._stream_id_is_outbound(frame.stream_id)
+        )
+        refused_push = (
+            isinstance(frame, PushPromiseFrame)
+            and frame.promised_stream_id > boundary
+        )
+        if not (refused or refused_push):
+            return False
+
+        # RFC 9113 Section 6.8: refused frames still affect HPACK and
+        # connection-wide flow control. The data is already discarded.
+        if isinstance(frame, (HeadersFrame, PushPromiseFrame)):
+            _decode_headers(self.decoder, frame.data)
+        elif isinstance(frame, DataFrame):
+            manager = self._inbound_flow_control_window_manager
+            size = frame.flow_controlled_length
+            manager.window_consumed(size)
+            increment = manager.process_bytes(size)
+            if increment:
+                update = WindowUpdateFrame(0)
+                update.window_increment = increment
+                self._prepare_for_sending([update])
+        return True
+
     def _receive_frame(self, frame: Frame) -> list[Event]:
         """
         Handle a frame received on the connection.
@@ -1628,6 +1689,8 @@ class H2Connection:
         ):
             return []
         try:
+            if self._ignore_frame_after_local_goaway(frame):
+                return []
             # I don't love using __class__ here, maybe reconsider it.
             frames, events = self._frame_dispatch_table[frame.__class__](frame)
         except StreamClosedError as e:
