@@ -535,6 +535,9 @@ class H2Connection:
         )
 
         self._data_to_send += preamble + f.serialize()
+        initial_window_increment = self.config.initial_connection_window_size - 65535
+        if initial_window_increment:
+            self.increment_flow_control_window(initial_window_increment)
 
     def initiate_upgrade_connection(self, settings_header: bytes | None = None) -> bytes | None:
         """

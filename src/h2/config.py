@@ -149,6 +149,13 @@ class H2Configuration:
         .. versionadded:: 2.6.0
 
     :type logger: ``logging.Logger``
+
+    :param initial_connection_window_size: The connection-wide receive flow
+        control window to advertise when the connection starts. Values must be
+        between 65535 (the HTTP/2 default) and 2**31 - 1. Larger windows
+        allow automatic flow control to support higher bandwidth-delay paths.
+        This is distinct from the per-stream INITIAL_WINDOW_SIZE setting.
+    :type initial_connection_window_size: ``int``
     """
 
     client_side = _BooleanConfigOption("client_side")
@@ -176,7 +183,8 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
-                 logger: DummyLogger | OutputLogger | None = None) -> None:
+                 logger: DummyLogger | OutputLogger | None = None,
+                 initial_connection_window_size: int = 65535) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
         self.validate_outbound_headers = validate_outbound_headers
@@ -185,6 +193,19 @@ class H2Configuration:
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
         self.logger = logger or DummyLogger(__name__)
+        self.initial_connection_window_size = initial_connection_window_size
+
+    @property
+    def initial_connection_window_size(self) -> int:
+        """Connection-level inbound flow-control window on startup."""
+        return self._initial_connection_window_size
+
+    @initial_connection_window_size.setter
+    def initial_connection_window_size(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or not (65535 <= value <= 2**31 - 1):
+            msg = "initial_connection_window_size must be an integer between 65535 and 2**31 - 1"
+            raise ValueError(msg)
+        self._initial_connection_window_size = value
 
     @property
     def header_encoding(self) -> bool | str | None:
