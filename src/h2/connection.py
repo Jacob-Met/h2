@@ -1184,8 +1184,7 @@ class H2Connection:
         if last_stream_id is None:
             last_stream_id = self.highest_inbound_stream_id
         if (
-            graceful
-            and self._local_goaway_last_stream_id is not None
+            self._local_goaway_last_stream_id is not None
             and last_stream_id > self._local_goaway_last_stream_id
         ):
             msg = "Last stream ID cannot increase during graceful shutdown"
@@ -1212,8 +1211,9 @@ class H2Connection:
             additional_data=(additional_data or b""),
         )
         self._prepare_for_sending([f])
-        if graceful:
+        if graceful or self._local_goaway_last_stream_id is not None:
             self._local_goaway_last_stream_id = last_stream_id
+        if graceful:
             self.state_machine._start_draining(open_state)
 
     def update_settings(self, new_settings: dict[SettingCodes | int, int]) -> None:

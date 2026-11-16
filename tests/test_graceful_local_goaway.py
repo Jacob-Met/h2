@@ -171,3 +171,30 @@ def test_client_can_send_outstanding_request_after_local_goaway() -> None:
     server.send_headers(1, RESPONSE, end_stream=True)
     response = client.receive_data(server.data_to_send())
     assert [type(event) for event in response] == [ResponseReceived, StreamEnded]
+
+
+
+def test_error_goaway_cannot_expand_previous_graceful_boundary() -> None:
+    """A terminal GOAWAY cannot claim streams already declined as unprocessed."""
+    _, server = connected_pair()
+    server.close_connection(graceful=True, last_stream_id=1)
+    with pytest.raises(ValueError, match="cannot increase"):
+        server.close_connection(
+            error_code=ErrorCodes.INTERNAL_ERROR,
+            last_stream_id=3,
+        )
+    assert server.state_machine.draining
+    server.close_connection(
+        error_code=ErrorCodes.INTERNAL_ERROR,
+        last_stream_id=1,
+    )
+    assert not server.state_machine.draining
+    server.close_connection(
+        error_code=ErrorCodes.INTERNAL_ERROR,
+        last_stream_id=0,
+    )
+    with pytest.raises(ValueError, match="cannot increase"):
+        server.close_connection(
+            error_code=ErrorCodes.INTERNAL_ERROR,
+            last_stream_id=1,
+        )
