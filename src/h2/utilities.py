@@ -352,7 +352,8 @@ def _validate_pseudo_header_value(header: Header) -> None:
         msg = f"Invalid :scheme pseudo-header value {value!r}"
         raise ProtocolError(msg)
     if name == b":status" and (
-        len(value) != 3 or not value.isdigit() or not (b"100" <= value <= b"599")
+        value == b"101" or len(value) != 3 or not value.isdigit()
+        or not (b"100" <= value <= b"599")
     ):
         msg = f"Invalid :status pseudo-header value {value!r}"
         raise ProtocolError(msg)
