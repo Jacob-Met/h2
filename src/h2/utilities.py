@@ -7,6 +7,7 @@ Utility functions that do not belong in a separate module.
 from __future__ import annotations
 
 import collections
+import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hpack.struct import HeaderTuple, NeverIndexedHeaderTuple
@@ -20,6 +21,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 SIGIL = ord(b":")
 INFORMATIONAL_START = ord(b"1")
+
+# HTTP method tokens (RFC 9110 section 5.6.2) and URI schemes (RFC 3986).
+_METHOD_TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_URI_SCHEME = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]*")
 
 
 # A set of headers that are hop-by-hop or connection-specific and thus
@@ -337,18 +342,56 @@ def _assert_header_in_set(bytes_header: bytes,
         raise ProtocolError(msg)
 
 
+def _validate_pseudo_header_value(header: Header) -> None:
+    """Reject malformed method, scheme and status control values."""
+    name, value = header
+    if name == b":method" and _METHOD_TOKEN.fullmatch(value) is None:
+        msg = f"Invalid :method pseudo-header value {value!r}"
+        raise ProtocolError(msg)
+    if name == b":scheme" and _URI_SCHEME.fullmatch(value) is None:
+        msg = f"Invalid :scheme pseudo-header value {value!r}"
+        raise ProtocolError(msg)
+    if name == b":status" and (
+        len(value) != 3 or not value.isdigit() or not (b"100" <= value <= b"599")
+    ):
+        msg = f"Invalid :status pseudo-header value {value!r}"
+        raise ProtocolError(msg)
+
+
+def _validate_http_request_target(pseudo_values: dict[bytes, bytes]) -> None:
+    """Enforce the HTTP(S) origin-form target and authority constraints."""
+    scheme = pseudo_values.get(b":scheme")
+    if scheme is None or scheme.lower() not in (b"http", b"https"):
+        return
+
+    method = pseudo_values.get(b":method")
+    path = pseudo_values.get(b":path")
+    if path is not None and (
+        b"#" in path or not (
+            path.startswith(b"/") or (path == b"*" and method == b"OPTIONS")
+        )
+    ):
+        msg = f"Invalid :path pseudo-header value {path!r} for {scheme!r}"
+        raise ProtocolError(msg)
+
+    authority = pseudo_values.get(b":authority")
+    # RFC 9113 section 8.3.1 forbids userinfo in :authority.
+    if authority is not None and (
+        not authority or any(char in authority for char in (b"@", b"/", b"?", b"#"))
+    ):
+        msg = f"Invalid :authority pseudo-header value {authority!r}"
+        raise ProtocolError(msg)
+
+
 def _reject_pseudo_header_fields(headers: Iterable[Header],
                                  hdr_validation_flags: HeaderValidationFlags) -> Generator[Header, None, None]:
     """
-    Raises a ProtocolError if duplicate pseudo-header fields are found in a
-    header block or if a pseudo-header field appears in a block after an
-    ordinary header field.
-
-    Raises a ProtocolError if pseudo-header fields are found in trailers.
+    Reject duplicate, out-of-order or invalid pseudo-headers, including
+    malformed request targets and response status codes.
     """
     seen_pseudo_header_fields = set()
     seen_regular_header = False
-    method = None
+    pseudo_values: dict[bytes, bytes] = {}
 
     for header in headers:
         if header[0][0] == SIGIL:
@@ -366,16 +409,8 @@ def _reject_pseudo_header_fields(headers: Iterable[Header],
                 msg = f"Received custom pseudo-header field {header[0]!r}"
                 raise ProtocolError(msg)
 
-            if header[0] == b":method":
-                method = header[1]
-            elif header[0] == b":status":
-                # RFC 9110 § 15: HTTP status codes are three ASCII digits
-                # in the range 100-599. A malformed :status is a protocol error.
-                status = header[1]
-                if len(status) != 3 or not status.isdigit() or not (b"100" <= status <= b"599"):
-                    msg = f"Invalid :status pseudo-header value {status!r}"
-                    raise ProtocolError(msg)
-
+            _validate_pseudo_header_value(header)
+            pseudo_values[header[0]] = header[1]
         else:
             seen_regular_header = True
 
@@ -383,8 +418,9 @@ def _reject_pseudo_header_fields(headers: Iterable[Header],
 
     # Check the pseudo-headers we got to confirm they're acceptable.
     _check_pseudo_header_field_acceptability(
-        seen_pseudo_header_fields, method, hdr_validation_flags,
+        seen_pseudo_header_fields, pseudo_values.get(b":method"), hdr_validation_flags,
     )
+    _validate_http_request_target(pseudo_values)
 
 
 def _check_pseudo_header_field_acceptability(  # noqa: C901
