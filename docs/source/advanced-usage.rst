@@ -191,6 +191,32 @@ taking any other active, unprompted action on the connection. In this instance,
 you'll want to make all the relevant ``send_*`` calls, and *then* call
 :meth:`data_to_send <h2.connection.H2Connection.data_to_send>`.
 
+Graceful Shutdown
+~~~~~~~~~~~~~~~~~
+
+By default, :meth:`close_connection <h2.connection.H2Connection.close_connection>`
+emits GOAWAY and makes further operations on the connection invalid. To
+stop accepting new streams while allowing existing requests and responses to
+finish, instead pass ``graceful=True``:
+
+.. code-block:: python
+
+    connection.close_connection(graceful=True)
+
+Send the bytes from ``data_to_send()`` to the peer, then continue handling
+incoming events and sending headers, data, or flow-control updates for streams
+that were already open. New locally initiated streams are not allowed.
+Receiving :class:`ConnectionTerminated <h2.events.ConnectionTerminated>`
+after a graceful GOAWAY does not imply that the in-flight response is complete:
+keep processing until the relevant stream ends or resets.
+
+For a two-stage server shutdown, first call ``close_connection`` with
+``graceful=True, last_stream_id=2**31 - 1``, allowing in-flight stream
+creation to settle for at least a round-trip time. Then send another graceful
+GOAWAY with the highest peer-initiated stream ID actually processed. That
+identifier must never increase across GOAWAY frames. Once existing streams
+finish, close the underlying transport; h2 does not perform network I/O.
+
 Headers
 -------
 
