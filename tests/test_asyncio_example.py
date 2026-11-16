@@ -171,3 +171,34 @@ def test_asyncio_example_mixed_text_and_binary_requests_round_trip():
         assert not protocol.response_tasks
 
     asyncio.run(exercise())
+
+
+def test_asyncio_example_rejects_oversized_upload_without_blocking_other_streams():
+    """An oversized request gets 413 while another request still succeeds."""
+    async def exercise():
+        protocol = _example_protocol()()
+        protocol.MAX_REQUEST_BODY_BYTES = 8
+        transport = MemoryTransport()
+        protocol.connection_made(transport)
+        client = h2.connection.H2Connection()
+        client.initiate_connection()
+        client.send_headers(1, _request(b"POST", b"/too-large"))
+        client.send_headers(3, _request(b"GET", b"/healthy"), end_stream=True)
+        client.send_data(1, b"123456789", end_stream=False)
+        protocol.data_received(client.data_to_send())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        responses = [event for event in client.receive_data(bytes(transport.output))
+                     if isinstance(event, h2.events.ResponseReceived)]
+        statuses = {event.stream_id: dict(event.headers)[b":status"] for event in responses}
+        assert statuses == {1: b"413", 3: b"200"}
+        assert 1 not in protocol.stream_data
+        assert 1 in protocol.rejected_streams
+
+        client.send_data(1, b"remaining data", end_stream=True)
+        protocol.data_received(client.data_to_send())
+        assert 1 not in protocol.rejected_streams
+        assert not protocol.stream_data
+
+    asyncio.run(exercise())

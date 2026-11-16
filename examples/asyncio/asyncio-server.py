@@ -33,11 +33,15 @@ RequestData = collections.namedtuple('RequestData', ['headers', 'data'])
 
 
 class H2Protocol(asyncio.Protocol):
+    # Bound the in-memory echo buffer for each active request.
+    MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
     def __init__(self):
         config = H2Configuration(client_side=False, header_encoding='utf-8')
         self.conn = H2Connection(config=config)
         self.transport = None
         self.stream_data = {}
+        self.rejected_streams = set()
         self.flow_control_futures = {}
         self.response_tasks = {}
 
@@ -54,6 +58,7 @@ class H2Protocol(asyncio.Protocol):
             task.cancel()
         self.response_tasks.clear()
         self.stream_data.clear()
+        self.rejected_streams.clear()
 
     def data_received(self, data: bytes):
         try:
@@ -96,6 +101,7 @@ class H2Protocol(asyncio.Protocol):
         """
         # A completed request must not retain its body for the lifetime of the
         # connection. The peer might already have reset this stream.
+        self.rejected_streams.discard(stream_id)
         request_data = self.stream_data.pop(stream_id, None)
         if request_data is None:
             return
@@ -138,6 +144,12 @@ class H2Protocol(asyncio.Protocol):
         data in flow control so that the client can send more data).
         Otherwise, reset the stream.
         """
+        if stream_id in self.rejected_streams:
+            # Keep the connection receive window usable while the client
+            # finishes a request that we have already rejected.
+            self.conn.acknowledge_received_data(flow_controlled_length, stream_id)
+            return
+
         try:
             stream_data = self.stream_data[stream_id]
         except KeyError:
@@ -145,12 +157,25 @@ class H2Protocol(asyncio.Protocol):
                 stream_id, error_code=ErrorCodes.PROTOCOL_ERROR
             )
         else:
-            stream_data.data.write(data)
             self.conn.acknowledge_received_data(flow_controlled_length, stream_id)
+            if stream_data.data.tell() + len(data) > self.MAX_REQUEST_BODY_BYTES:
+                self.stream_data.pop(stream_id)
+                self.rejected_streams.add(stream_id)
+                try:
+                    self.conn.send_headers(stream_id, (
+                        (':status', '413'),
+                        ('content-length', '0'),
+                    ), end_stream=True)
+                except (StreamClosedError, ProtocolError):
+                    # A reset might already be in this receive_data batch.
+                    self.rejected_streams.discard(stream_id)
+            else:
+                stream_data.data.write(data)
 
     def stream_reset(self, stream_id):
         """Release request bodies and pending responses when a stream resets."""
         self.stream_data.pop(stream_id, None)
+        self.rejected_streams.discard(stream_id)
         future = self.flow_control_futures.pop(stream_id, None)
         if future is not None:
             future.cancel()

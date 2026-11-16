@@ -9,6 +9,8 @@ basically just the same JSON-headers-returning server that was built in the
 This example demonstrates some basic asyncio techniques. A request body that
 is not valid UTF-8 is echoed in the JSON response as Base64 in ``body`` with
 ``body_encoding`` set to ``base64``; UTF-8 bodies keep the original text form.
+Request bodies larger than 1 MiB receive HTTP 413 without buffering the rest
+of the upload; other streams on the connection continue normally.
 
 .. literalinclude:: ../../examples/asyncio/asyncio-server.py
    :language: python
