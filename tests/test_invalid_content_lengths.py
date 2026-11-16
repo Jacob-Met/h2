@@ -255,3 +255,47 @@ class TestInvalidContentLengths:
             error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
+
+
+@pytest.mark.parametrize("method", [b"HEAD", b"GET"])
+def test_pushed_request_method_controls_declared_body_length(
+    frame_factory, method,
+) -> None:
+    """A pushed HEAD response can declare content-length without carrying content."""
+    c = h2.connection.H2Connection()
+    c.initiate_connection()
+    c.send_headers(
+        1,
+        [
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"example.com"),
+            (b":path", b"/"),
+        ],
+    )
+    push = frame_factory.build_push_promise_frame(
+        stream_id=1,
+        promised_stream_id=2,
+        headers=[
+            (b":method", method),
+            (b":scheme", b"https"),
+            (b":authority", b"example.com"),
+            (b":path", b"/pushed"),
+        ],
+    )
+    headers = frame_factory.build_headers_frame(
+        headers=[(b":status", b"200"), (b"content-length", b"1234")],
+        stream_id=2,
+    )
+    end = frame_factory.build_data_frame(
+        data=b"", flags=["END_STREAM"], stream_id=2,
+    )
+    if method == b"HEAD":
+        events = c.receive_data(push.serialize() + headers.serialize() + end.serialize())
+        assert any(
+            isinstance(event, h2.events.StreamEnded) and event.stream_id == 2
+            for event in events
+        )
+    else:
+        with pytest.raises(h2.exceptions.InvalidBodyLengthError):
+            c.receive_data(push.serialize() + headers.serialize() + end.serialize())
