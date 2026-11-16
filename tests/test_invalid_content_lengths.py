@@ -591,3 +591,46 @@ class TestNoBodyContentLengths:
             h2.events.ResponseReceived,
             h2.events.StreamEnded,
         ]
+
+    @pytest.mark.parametrize("method", [b"HEAD", b"GET"])
+    @pytest.mark.parametrize("end_on_headers", [True, False])
+    def test_pushed_request_method_controls_response_length(
+        self, frame_factory, method, end_on_headers,
+    ) -> None:
+        """
+        The method of the promised request determines whether the pushed
+        response may declare a body without sending it.
+        """
+        c = h2.connection.H2Connection()
+        c.initiate_connection()
+        c.send_headers(1, self.request_headers)
+        pushed_headers = [
+            (name, method if name == b":method" else value)
+            for name, value in self.request_headers
+        ]
+        push = frame_factory.build_push_promise_frame(
+            stream_id=1,
+            promised_stream_id=2,
+            headers=pushed_headers,
+        )
+        response = frame_factory.build_headers_frame(
+            headers=[(b":status", b"200"), (b"content-length", b"1234")],
+            flags=["END_STREAM"] if end_on_headers else [],
+            stream_id=2,
+        )
+        response_bytes = response.serialize()
+        if not end_on_headers:
+            data = frame_factory.build_data_frame(
+                data=b"", flags=["END_STREAM"], stream_id=2,
+            )
+            response_bytes += data.serialize()
+
+        if method == b"HEAD":
+            events = c.receive_data(push.serialize() + response_bytes)
+            assert any(
+                isinstance(event, h2.events.StreamEnded) and event.stream_id == 2
+                for event in events
+            )
+        else:
+            with pytest.raises(h2.exceptions.InvalidBodyLengthError):
+                c.receive_data(push.serialize() + response_bytes)
