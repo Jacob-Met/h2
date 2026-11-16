@@ -133,3 +133,41 @@ def test_asyncio_example_reset_cancels_flow_control_blocked_response():
         assert not protocol.response_tasks
 
     asyncio.run(exercise())
+
+
+def test_asyncio_example_mixed_text_and_binary_requests_round_trip():
+    """A binary request must not break another stream or strand its response."""
+    import base64
+    import json
+
+    async def exercise():
+        protocol = _example_protocol()()
+        transport = MemoryTransport()
+        protocol.connection_made(transport)
+
+        client = h2.connection.H2Connection()
+        client.initiate_connection()
+        client.send_headers(1, _request(b"POST", b"/text"))
+        client.send_headers(3, _request(b"POST", b"/binary"))
+        client.send_data(1, b"hello ", end_stream=False)
+        client.send_data(3, b"\x00\xff", end_stream=False)
+        client.send_data(1, b"world", end_stream=True)
+        client.send_data(3, b"\xfe\x80", end_stream=True)
+
+        protocol.data_received(client.data_to_send())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        responses = {}
+        for event in client.receive_data(bytes(transport.output)):
+            if isinstance(event, h2.events.DataReceived):
+                responses.setdefault(event.stream_id, bytearray()).extend(event.data)
+
+        assert json.loads(responses[1])["body"] == "hello world"
+        binary = json.loads(responses[3])
+        assert binary["body_encoding"] == "base64"
+        assert base64.b64decode(binary["body"]) == b"\x00\xff\xfe\x80"
+        assert not protocol.stream_data
+        assert not protocol.response_tasks
+
+    asyncio.run(exercise())
