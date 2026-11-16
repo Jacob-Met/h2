@@ -368,6 +368,13 @@ def _reject_pseudo_header_fields(headers: Iterable[Header],
 
             if header[0] == b":method":
                 method = header[1]
+            elif header[0] == b":status":
+                # RFC 9110 § 15: HTTP status codes are three ASCII digits
+                # in the range 100-599. A malformed :status is a protocol error.
+                status = header[1]
+                if len(status) != 3 or not status.isdigit() or not (b"100" <= status <= b"599"):
+                    msg = f"Invalid :status pseudo-header value {status!r}"
+                    raise ProtocolError(msg)
 
         else:
             seen_regular_header = True
