@@ -255,3 +255,37 @@ class TestInvalidContentLengths:
             error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
+
+
+@pytest.mark.parametrize(
+    ("lengths", "error"),
+    [
+        ([b"bogus"], "Invalid content-length header"),
+        ([b"1", b"2"], "Conflicting content-length headers"),
+    ],
+)
+def test_head_response_validates_content_length_fields(
+    frame_factory, lengths, error,
+) -> None:
+    """HEAD responses still require well-formed and consistent content-length fields."""
+    c = h2.connection.H2Connection()
+    c.initiate_connection()
+    c.send_headers(
+        1,
+        [
+            (b":method", b"HEAD"),
+            (b":scheme", b"https"),
+            (b":authority", b"example.com"),
+            (b":path", b"/"),
+        ],
+        end_stream=True,
+    )
+    response = frame_factory.build_headers_frame(
+        headers=[
+            (b":status", b"200"),
+            *((b"content-length", value) for value in lengths),
+        ],
+        flags=["END_STREAM"],
+    )
+    with pytest.raises(h2.exceptions.ProtocolError, match=error):
+        c.receive_data(response.serialize())

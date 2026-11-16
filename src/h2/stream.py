@@ -1360,10 +1360,9 @@ class H2Stream:
         _expected_content_length field from it. It's not an error for no
         Content-Length header to be present.
         """
-        if self.request_method == b"HEAD":
-            self._expected_content_length = 0
-            return
-
+        # A HEAD response may describe the body length without sending it,
+        # but the field syntax and duplicate values must still be valid.
+        no_content = self.request_method == b"HEAD"
         content_length = None
 
         for n, v in headers:
@@ -1385,7 +1384,7 @@ class H2Stream:
                     msg = f"Conflicting content-length headers: {content_length} and {parsed_content_length}"
                     raise ProtocolError(msg)
 
-        self._expected_content_length = content_length
+        self._expected_content_length = 0 if no_content else content_length
 
     def _track_content_length(self, length: int, end_stream: bool) -> None:
         """
