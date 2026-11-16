@@ -10,10 +10,12 @@ those without. In particular, it demonstrates the fact that DataReceived may
 be called multiple times, and that applications must handle that possibility.
 """
 import asyncio
+import base64
 import io
 import json
 import ssl
 import collections
+from pathlib import Path
 from typing import List, Tuple
 
 from h2.config import H2Configuration
@@ -96,11 +98,15 @@ class H2Protocol(asyncio.Protocol):
             return
 
         headers = request_data.headers
-        body = request_data.data.getvalue().decode('utf-8')
-
-        data = json.dumps(
-            {"headers": headers, "body": body}, indent=4
-        ).encode("utf8")
+        raw_body = request_data.data.getvalue()
+        response = {"headers": headers}
+        try:
+            response["body"] = raw_body.decode('utf-8')
+        except UnicodeDecodeError:
+            # JSON cannot carry arbitrary bytes: make the echo lossless.
+            response["body"] = base64.b64encode(raw_body).decode('ascii')
+            response["body_encoding"] = "base64"
+        data = json.dumps(response, indent=4).encode("utf8")
 
         response_headers = (
             (':status', '200'),
@@ -190,26 +196,28 @@ class H2Protocol(asyncio.Protocol):
             self.flow_control_futures = {}
 
 
-ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-ssl_context.options |= (
-    ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_COMPRESSION
-)
-ssl_context.load_cert_chain(certfile="cert.crt", keyfile="cert.key")
-ssl_context.set_alpn_protocols(["h2"])
+if __name__ == "__main__":
+    ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ssl_context.options |= (
+        ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_COMPRESSION
+    )
+    cert_dir = Path(__file__).resolve().parent
+    ssl_context.load_cert_chain(certfile=cert_dir / "cert.crt", keyfile=cert_dir / "cert.key")
+    ssl_context.set_alpn_protocols(["h2"])
 
-loop = asyncio.get_event_loop()
-# Each client connection will create a new protocol instance
-coro = loop.create_server(H2Protocol, '127.0.0.1', 8443, ssl=ssl_context)
-server = loop.run_until_complete(coro)
+    loop = asyncio.get_event_loop()
+    # Each client connection will create a new protocol instance
+    coro = loop.create_server(H2Protocol, '127.0.0.1', 8443, ssl=ssl_context)
+    server = loop.run_until_complete(coro)
 
-# Serve requests until Ctrl+C is pressed
-print('Serving on {}'.format(server.sockets[0].getsockname()))
-try:
-    loop.run_forever()
-except KeyboardInterrupt:
-    pass
-finally:
-    # Close the server
-    server.close()
-    loop.run_until_complete(server.wait_closed())
-    loop.close()
+    # Serve requests until Ctrl+C is pressed
+    print('Serving on {}'.format(server.sockets[0].getsockname()))
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Close the server
+        server.close()
+        loop.run_until_complete(server.wait_closed())
+        loop.close()
