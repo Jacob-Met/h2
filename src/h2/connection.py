@@ -503,7 +503,7 @@ class H2Connection:
 
         s.state_machine.on_state_change = self._stream_state_changed
         self.streams[stream_id] = s
-        self.config.logger.debug("Current streams: %s", self.streams.keys())
+        self.config.logger.debug("Current streams: %d", len(self.streams))
 
         if outbound:
             self.highest_outbound_stream_id = stream_id
