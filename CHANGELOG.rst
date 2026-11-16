@@ -11,6 +11,8 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Emit WindowUpdated events for open streams when peer settings enlarge stream
+  send windows, allowing applications to resume blocked sends.
 
 **Bugfixes**
 
