@@ -14,6 +14,7 @@ import io
 import json
 import ssl
 import collections
+from pathlib import Path
 from typing import List, Tuple
 
 from h2.config import H2Configuration
@@ -37,6 +38,7 @@ class H2Protocol(asyncio.Protocol):
         self.transport = None
         self.stream_data = {}
         self.flow_control_futures = {}
+        self.response_tasks = {}
 
     def connection_made(self, transport: asyncio.Transport):
         self.transport = transport
@@ -46,7 +48,11 @@ class H2Protocol(asyncio.Protocol):
     def connection_lost(self, exc):
         for future in self.flow_control_futures.values():
             future.cancel()
-        self.flow_control_futures = {}
+        self.flow_control_futures.clear()
+        for task in self.response_tasks.values():
+            task.cancel()
+        self.response_tasks.clear()
+        self.stream_data.clear()
 
     def data_received(self, data: bytes):
         try:
@@ -79,8 +85,6 @@ class H2Protocol(asyncio.Protocol):
 
     def request_received(self, headers: List[Tuple[str, str]], stream_id: int):
         headers = collections.OrderedDict(headers)
-        method = headers[':method']
-
         # Store off the request data.
         request_data = RequestData(headers, io.BytesIO())
         self.stream_data[stream_id] = request_data
@@ -89,27 +93,37 @@ class H2Protocol(asyncio.Protocol):
         """
         When a stream is complete, we can send our response.
         """
-        try:
-            request_data = self.stream_data[stream_id]
-        except KeyError:
-            # Just return, we probably 405'd this already
+        # A completed request must not retain its body for the lifetime of the
+        # connection. The peer might already have reset this stream.
+        request_data = self.stream_data.pop(stream_id, None)
+        if request_data is None:
             return
 
         headers = request_data.headers
         body = request_data.data.getvalue().decode('utf-8')
-
         data = json.dumps(
             {"headers": headers, "body": body}, indent=4
         ).encode("utf8")
-
         response_headers = (
             (':status', '200'),
             ('content-type', 'application/json'),
             ('content-length', str(len(data))),
             ('server', 'asyncio-h2'),
         )
-        self.conn.send_headers(stream_id, response_headers)
-        asyncio.ensure_future(self.send_data(data, stream_id))
+
+        # HEAD advertises the representation length without sending DATA.
+        is_head = headers[':method'] == 'HEAD'
+        try:
+            self.conn.send_headers(stream_id, response_headers, end_stream=is_head)
+        except (StreamClosedError, ProtocolError):
+            # A reset can arrive in the same receive_data batch as END_STREAM.
+            return
+        if not is_head:
+            task = asyncio.create_task(self.send_data(data, stream_id))
+            self.response_tasks[stream_id] = task
+            task.add_done_callback(
+                lambda completed, sid=stream_id: self.response_tasks.pop(sid, None)
+            )
 
     def receive_data(self, data: bytes, flow_controlled_length: int, stream_id: int):
         """
@@ -129,12 +143,14 @@ class H2Protocol(asyncio.Protocol):
             self.conn.acknowledge_received_data(flow_controlled_length, stream_id)
 
     def stream_reset(self, stream_id):
-        """
-        A stream reset was sent. Stop sending data.
-        """
-        if stream_id in self.flow_control_futures:
-            future = self.flow_control_futures.pop(stream_id)
+        """Release request bodies and pending responses when a stream resets."""
+        self.stream_data.pop(stream_id, None)
+        future = self.flow_control_futures.pop(stream_id, None)
+        if future is not None:
             future.cancel()
+        task = self.response_tasks.pop(stream_id, None)
+        if task is not None:
+            task.cancel()
 
     async def send_data(self, data, stream_id):
         """
@@ -190,26 +206,24 @@ class H2Protocol(asyncio.Protocol):
             self.flow_control_futures = {}
 
 
-ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-ssl_context.options |= (
-    ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_COMPRESSION
-)
-ssl_context.load_cert_chain(certfile="cert.crt", keyfile="cert.key")
-ssl_context.set_alpn_protocols(["h2"])
+async def serve():
+    """Serve TLS HTTP/2 traffic using the current asyncio event loop."""
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    ssl_context.options |= ssl.OP_NO_COMPRESSION
+    certificate_dir = Path(__file__).resolve().parent
+    ssl_context.load_cert_chain(
+        certfile=certificate_dir / "cert.crt",
+        keyfile=certificate_dir / "cert.key",
+    )
+    ssl_context.set_alpn_protocols(["h2"])
 
-loop = asyncio.get_event_loop()
-# Each client connection will create a new protocol instance
-coro = loop.create_server(H2Protocol, '127.0.0.1', 8443, ssl=ssl_context)
-server = loop.run_until_complete(coro)
+    loop = asyncio.get_running_loop()
+    server = await loop.create_server(H2Protocol, '127.0.0.1', 8443, ssl=ssl_context)
+    print('Serving on {}'.format(server.sockets[0].getsockname()), flush=True)
+    async with server:
+        await server.serve_forever()
 
-# Serve requests until Ctrl+C is pressed
-print('Serving on {}'.format(server.sockets[0].getsockname()))
-try:
-    loop.run_forever()
-except KeyboardInterrupt:
-    pass
-finally:
-    # Close the server
-    server.close()
-    loop.run_until_complete(server.wait_closed())
-    loop.close()
+
+if __name__ == "__main__":
+    asyncio.run(serve())
