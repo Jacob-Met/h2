@@ -128,7 +128,7 @@ class TestReceivingInformationalResponses:
             stream_id=1,
         )
         f2 = frame_factory.build_headers_frame(
-            headers=[(":status", "101")],
+            headers=[(":status", "102")],
             stream_id=1,
         )
         events = c.receive_data(f1.serialize() + f2.serialize())
@@ -140,7 +140,7 @@ class TestReceivingInformationalResponses:
         assert events[0].stream_id == 1
 
         assert isinstance(events[1], h2.events.InformationalResponseReceived)
-        assert events[1].headers == [(b":status", b"101")]
+        assert events[1].headers == [(b":status", b"102")]
         assert events[1].stream_id == 1
 
     @pytest.mark.parametrize("end_stream", [True, False])
@@ -384,7 +384,7 @@ class TestSendingInformationalResponses:
         )
         c.send_headers(
             stream_id=1,
-            headers=[(b":status", b"101")],
+            headers=[(b":status", b"102")],
         )
 
         # Check we sent them both.
@@ -393,7 +393,7 @@ class TestSendingInformationalResponses:
             stream_id=1,
         )
         f2 = frame_factory.build_headers_frame(
-            headers=[(":status", "101")],
+            headers=[(":status", "102")],
             stream_id=1,
         )
         assert c.data_to_send() == f1.serialize() + f2.serialize()

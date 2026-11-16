@@ -1158,3 +1158,35 @@ def test_valid_request_pseudo_header_values_preserved(
         )
         events = conn.receive_data(frame.serialize())
         assert any(isinstance(event, h2.events.RequestReceived) for event in events)
+
+
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
+def test_switching_protocols_status_is_not_supported_in_http2(
+    frame_factory, direction,
+) -> None:
+    """HTTP/2 cannot carry a 101 Switching Protocols response (RFC 9113 8.6)."""
+    request_headers = [
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"example.org"),
+        (b":path", b"/"),
+    ]
+    if direction == "inbound":
+        conn = h2.connection.H2Connection()
+        conn.initiate_connection()
+        conn.send_headers(1, request_headers, end_stream=True)
+        response = frame_factory.build_headers_frame(
+            headers=[(b":status", b"101")],
+        )
+        with pytest.raises(h2.exceptions.ProtocolError, match="101"):
+            conn.receive_data(response.serialize())
+    else:
+        conn = h2.connection.H2Connection(
+            h2.config.H2Configuration(client_side=False),
+        )
+        conn.initiate_connection()
+        conn.receive_data(frame_factory.preamble())
+        request = frame_factory.build_headers_frame(headers=request_headers)
+        conn.receive_data(request.serialize())
+        with pytest.raises(h2.exceptions.ProtocolError, match="101"):
+            conn.send_headers(1, [(b":status", b"101")])
