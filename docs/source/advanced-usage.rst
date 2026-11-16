@@ -273,11 +273,13 @@ of data on a stream, h2 will throw a :class:`ProtocolError
 <h2.exceptions.ProtocolError>` and refuse to send the data.
 
 In h2, receiving a ``WINDOW_UPDATE`` frame causes a :class:`WindowUpdated
-<h2.events.WindowUpdated>` event to fire. This will notify you that there is
-potentially more room in a flow control window. Note that, just because an
-increment of a given size was received *does not* mean that that much more data
-can be sent: remember that both the connection and stream flow control windows
-constrain how much data can be sent.
+<h2.events.WindowUpdated>` event to fire. An increase in the peer's
+``SETTINGS_INITIAL_WINDOW_SIZE`` also emits a ``WindowUpdated`` event
+for each open stream, after :class:`RemoteSettingsChanged
+<h2.events.RemoteSettingsChanged>`. A decrease emits only
+``RemoteSettingsChanged``. In either case a window event means there is
+*potentially* more room, not that all its delta can be sent: both the
+connection and stream flow control windows constrain how much data can be sent.
 
 As a result, when a :class:`WindowUpdated <h2.events.WindowUpdated>` event
 fires with a non-zero stream ID, and the user has more data to send on that

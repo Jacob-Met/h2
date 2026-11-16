@@ -11,6 +11,8 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Emit WindowUpdated events for active streams on positive changes to the
+  peer's SETTINGS_INITIAL_WINDOW_SIZE, so senders can resume after SETTINGS.
 
 **Bugfixes**
 

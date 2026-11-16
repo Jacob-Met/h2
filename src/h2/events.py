@@ -325,9 +325,11 @@ class WindowUpdated(Event):
     """
     The WindowUpdated event is fired whenever a flow control window changes
     size. HTTP/2 defines flow control windows for connections and streams: this
-    event fires for both connections and streams. The event carries the ID of
-    the stream to which it applies (set to zero if the window update applies to
-    the connection), and the delta in the window size.
+    event fires for both connections and streams. It also fires for each open
+    stream when remote SETTINGS_INITIAL_WINDOW_SIZE increases the stream's
+    available send credit. A decrease is reported only by RemoteSettingsChanged.
+    The event carries the ID of the stream to which it applies (set to zero
+    if the window update applies to the connection), and the positive delta.
     """
 
     stream_id: int
