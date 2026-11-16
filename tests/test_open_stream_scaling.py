@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+
+from h2.config import H2Configuration, OutputLogger
 from h2.connection import H2Connection
 from h2.stream import H2Stream, StreamClosedBy
 
@@ -43,3 +46,17 @@ def test_stream_counts_drop_on_reset_and_closed_stream_is_retired() -> None:
     assert conn._closed_streams[1] == StreamClosedBy.SEND_RST_STREAM
     conn.send_headers(3, headers)
     assert conn.open_outbound_streams == 1
+
+
+def test_debug_output_does_not_reprint_all_open_stream_ids() -> None:
+    """Debug tracing must not generate quadratic output as concurrent streams grow."""
+    stream_count = 400
+    log = io.StringIO()
+    conn = H2Connection(H2Configuration(logger=OutputLogger(file=log)))
+    conn.initiate_connection()
+    headers = [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"example.com"), (b":path", b"/")]
+    for i in range(stream_count):
+        conn.send_headers(2 * i + 1, headers)
+    output = log.getvalue()
+    assert "Current streams: dict_keys" not in output
+    assert len(output) < 600 * stream_count
