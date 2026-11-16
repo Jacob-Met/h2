@@ -1065,3 +1065,96 @@ def test_valid_status_pseudo_header_is_forbidden_in_request(frame_factory) -> No
     )
     with pytest.raises(h2.exceptions.ProtocolError, match="response-only headers"):
         conn.receive_data(request.serialize())
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        (b":method", b""),
+        (b":method", b"GET POST"),
+        (b":method", b"G/ET"),
+        (b":scheme", b""),
+        (b":scheme", b"9https"),
+        (b":scheme", b"https://"),
+        (b":path", b"relative"),
+        (b":path", b"*"),
+        (b":path", b"/some/path#fragment"),
+        (b":authority", b"user@example.org"),
+        (b":authority", b""),
+        (b":authority", b"example.org/resource"),
+        (b":authority", b"example.org#fragment"),
+        (b":authority", b"example.org?query"),
+    ],
+)
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
+def test_invalid_request_pseudo_header_values_rejected(
+    frame_factory, field, bad_value, direction,
+) -> None:
+    """Malformed HTTP/2 control values must fail at the HTTP/2 boundary."""
+    request_headers = [
+        (key, bad_value if key == field else value)
+        for key, value in [
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"example.org"),
+            (b":path", b"/"),
+        ]
+    ]
+    if direction == "inbound":
+        conn = h2.connection.H2Connection(
+            h2.config.H2Configuration(client_side=False),
+        )
+        conn.initiate_connection()
+        conn.receive_data(frame_factory.preamble())
+        frame = frame_factory.build_headers_frame(
+            headers=request_headers, flags=["END_STREAM"],
+        )
+        with pytest.raises(h2.exceptions.ProtocolError):
+            conn.receive_data(frame.serialize())
+    else:
+        conn = h2.connection.H2Connection()
+        conn.initiate_connection()
+        with pytest.raises(h2.exceptions.ProtocolError):
+            conn.send_headers(1, request_headers, end_stream=True)
+
+
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
+@pytest.mark.parametrize(
+    "request_headers",
+    [
+        [(b":method", b"M-SEARCH"), (b":scheme", b"https"),
+         (b":authority", b"example.org:443"), (b":path", b"/x?y=z")],
+        [(b":method", b"GET"), (b":scheme", b"HTTP"),
+         (b":authority", b"example.org"), (b":path", b"/")],
+        [(b":method", b"OPTIONS"), (b":scheme", b"https"),
+         (b":authority", b"example.org"), (b":path", b"*")],
+        [(b":method", b"CONNECT"), (b":authority", b"example.org:443")],
+        [(b":method", b"CONNECT"), (b":scheme", b"https"),
+         (b":authority", b"example.org"), (b":path", b"/"),
+         (b":protocol", b"websocket")],
+        [(b":method", b"GET"), (b":scheme", b"https"),
+         (b":path", b"/"), (b"host", b"example.org")],
+        [(b":method", b"GET"), (b":scheme", b"custom+transport"),
+         (b":authority", b"example.org"), (b":path", b"relative/path")],
+    ],
+)
+def test_valid_request_pseudo_header_values_preserved(
+    frame_factory, direction, request_headers,
+) -> None:
+    """Special targets, extension methods and non-HTTP schemes still work."""
+    if direction == "outbound":
+        conn = h2.connection.H2Connection()
+        conn.initiate_connection()
+        conn.send_headers(1, request_headers, end_stream=True)
+        assert conn.data_to_send()
+    else:
+        conn = h2.connection.H2Connection(
+            h2.config.H2Configuration(client_side=False),
+        )
+        conn.initiate_connection()
+        conn.receive_data(frame_factory.preamble())
+        frame = frame_factory.build_headers_frame(
+            headers=request_headers, flags=["END_STREAM"],
+        )
+        events = conn.receive_data(frame.serialize())
+        assert any(isinstance(event, h2.events.RequestReceived) for event in events)
