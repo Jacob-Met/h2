@@ -10,6 +10,7 @@ those without. In particular, it demonstrates the fact that DataReceived may
 be called multiple times, and that applications must handle that possibility.
 """
 import asyncio
+import base64
 import io
 import json
 import ssl
@@ -100,10 +101,15 @@ class H2Protocol(asyncio.Protocol):
             return
 
         headers = request_data.headers
-        body = request_data.data.getvalue().decode('utf-8')
-        data = json.dumps(
-            {"headers": headers, "body": body}, indent=4
-        ).encode("utf8")
+        raw_body = request_data.data.getvalue()
+        response = {"headers": headers}
+        try:
+            response["body"] = raw_body.decode('utf-8')
+        except UnicodeDecodeError:
+            # JSON cannot carry arbitrary bytes: make the echo lossless.
+            response["body"] = base64.b64encode(raw_body).decode('ascii')
+            response["body_encoding"] = "base64"
+        data = json.dumps(response, indent=4).encode("utf8")
         response_headers = (
             (':status', '200'),
             ('content-type', 'application/json'),
