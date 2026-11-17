@@ -487,3 +487,34 @@ class TestGracefulGoAwayEdges:
         c.send_data(1, b"ok", end_stream=True)
         assert c.data_to_send()
         assert c.state_machine.draining
+
+
+def test_received_goaway_last_stream_id_must_not_increase(frame_factory) -> None:
+    """A peer cannot reclaim requests it already told the client to retry."""
+    client = TestGracefulGoAwayClient().client_with_request(frame_factory)
+    first = frame_factory.build_goaway_frame(last_stream_id=1)
+    invalid = frame_factory.build_goaway_frame(last_stream_id=3)
+
+    client.receive_data(first.serialize())
+    assert client.state_machine.draining
+    with pytest.raises(h2.exceptions.ProtocolError, match="Last stream ID"):
+        client.receive_data(invalid.serialize())
+    assert not client.state_machine.draining
+    assert client.state_machine.state == h2.connection.ConnectionState.CLOSED
+    error_reply = frame_factory.build_goaway_frame(
+        last_stream_id=0, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+    )
+    assert client.data_to_send() == error_reply.serialize()
+
+
+def test_received_goaway_last_stream_id_can_repeat_or_decrease(frame_factory) -> None:
+    """A normal two-stage drain still accepts decreasing and equal boundaries."""
+    client = TestGracefulGoAwayClient().client_with_request(frame_factory)
+    boundaries = [MAX_STREAM_ID, 3, 3, 1]
+    events = []
+    for boundary in boundaries:
+        wire = frame_factory.build_goaway_frame(last_stream_id=boundary).serialize()
+        events.extend(client.receive_data(wire))
+
+    assert [event.last_stream_id for event in events] == boundaries
+    assert client.state_machine.draining

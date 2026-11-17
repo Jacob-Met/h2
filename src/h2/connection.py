@@ -388,6 +388,7 @@ class H2Connection:
         self._open_stream_counts = [0, 0]
         self._pending_closed_streams: list[int] = []
         self._local_goaway_last_stream_id: int | None = None
+        self._remote_goaway_last_stream_id: int | None = None
         self.highest_inbound_stream_id = 0
         self.highest_outbound_stream_id = 0
         self.encoder = Encoder()
@@ -2053,6 +2054,17 @@ class H2Connection:
         """
         Receive a GOAWAY frame on the connection.
         """
+        # RFC 9113 Section 6.8: a peer must never increase the last stream
+        # ID across GOAWAYs. Requests above the earlier boundary may already
+        # have been retried on another connection.
+        if (
+            self._remote_goaway_last_stream_id is not None
+            and frame.last_stream_id > self._remote_goaway_last_stream_id
+        ):
+            msg = "Last stream ID cannot increase in received GOAWAY"
+            raise ProtocolError(msg)
+        self._remote_goaway_last_stream_id = frame.last_stream_id
+
         # The state the connection would be in without this GOAWAY: the state
         # before it, or the state an existing drain keeps. None if the
         # connection is already closed for good (an error GOAWAY, a protocol
