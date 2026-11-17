@@ -202,3 +202,32 @@ def test_asyncio_example_rejects_oversized_upload_without_blocking_other_streams
         assert not protocol.stream_data
 
     asyncio.run(exercise())
+
+
+def test_asyncio_example_preserves_repeated_header_values_in_echo():
+    """An echo of repeated HTTP/2 field names may not discard field values."""
+    import json
+
+    async def exercise():
+        protocol = _example_protocol()()
+        transport = MemoryTransport()
+        protocol.connection_made(transport)
+        client = h2.connection.H2Connection()
+        client.initiate_connection()
+        client.send_headers(1, _request(b"POST") + [
+            (b"x-trace-id", b"first"),
+            (b"x-trace-id", b"second"),
+            (b"x-single", b"only"),
+        ], end_stream=True)
+        protocol.data_received(client.data_to_send())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        payload = b"".join(event.data for event in client.receive_data(bytes(transport.output))
+                           if isinstance(event, h2.events.DataReceived))
+        headers = json.loads(payload)["headers"]
+        assert headers["x-trace-id"] == ["first", "second"]
+        assert headers["x-single"] == "only"
+        assert headers[":method"] == "POST"
+
+    asyncio.run(exercise())
