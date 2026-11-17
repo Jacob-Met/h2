@@ -447,8 +447,10 @@ class H2Connection:
         # until completion.
         self._header_frames: list[Frame] = []
 
-        # Data that needs to be sent.
+        # Data that needs to be sent. Track a consumed prefix to avoid
+        # copying the entire remaining buffer on every partial read.
         self._data_to_send = bytearray()
+        self._data_to_send_offset = 0
 
         # Keeps track of how streams are closed.
         # Used to ensure that we don't blow up in the face of frames that were
@@ -1522,11 +1524,29 @@ class H2Connection:
         :rtype: ``bytes``
         """
         if amount is None:
-            data = bytes(self._data_to_send)
-            self._data_to_send = bytearray()
+            data = bytes(self._data_to_send[self._data_to_send_offset:])
+            self.clear_outbound_data_buffer()
             return data
-        data = bytes(self._data_to_send[:amount])
-        self._data_to_send = self._data_to_send[amount:]
+
+        available = len(self._data_to_send) - self._data_to_send_offset
+        if amount < 0:
+            # Preserve the slice semantics of the original implementation.
+            amount = max(0, available + amount)
+        amount = min(amount, available)
+        if not amount:
+            return b""
+
+        end = self._data_to_send_offset + amount
+        data = bytes(self._data_to_send[self._data_to_send_offset:end])
+        if end == len(self._data_to_send):
+            self.clear_outbound_data_buffer()
+        elif end >= len(self._data_to_send) // 2:
+            # Geometric compaction makes the total copied tail O(n), rather
+            # than O(n²) when callers drain a large buffer in small chunks.
+            del self._data_to_send[:end]
+            self._data_to_send_offset = 0
+        else:
+            self._data_to_send_offset = end
         return data
 
     def clear_outbound_data_buffer(self) -> None:
@@ -1540,6 +1560,7 @@ class H2Connection:
         exposing implementation details.
         """
         self._data_to_send = bytearray()
+        self._data_to_send_offset = 0
 
     def _acknowledge_settings(self) -> tuple[list[Frame], list[WindowUpdated]]:
         """
