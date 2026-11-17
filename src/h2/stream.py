@@ -905,8 +905,10 @@ class H2Stream:
         if self.state_machine.client and self._authority is None:
             self._authority = authority_from_headers(bytes_headers)
 
-        # store request method for _initialize_content_length
-        self.request_method = extract_method_header(bytes_headers)
+        # Trailers have no method; keep the one from the initial request.
+        method = extract_method_header(bytes_headers)
+        if method is not None:
+            self.request_method = method
 
         return frames
 
@@ -1060,6 +1062,7 @@ class H2Stream:
             StreamInputs.RECV_PUSH_PROMISE,
         )
         self._authority = authority_from_headers(pushed_headers)
+        self.request_method = extract_method_header(pushed_headers)
         return [], events
 
     def receive_headers(self,
@@ -1099,6 +1102,11 @@ class H2Stream:
         if isinstance(headers_event, TrailersReceived) and not end_stream:
             msg = "Trailers must have END_STREAM set"
             raise ProtocolError(msg)
+
+        # A message with END_STREAM on its first HEADERS has no DATA frames.
+        # Validate it just as we would a final DATA frame.
+        if end_stream and not isinstance(headers_event, TrailersReceived):
+            self._track_content_length(0, end_stream=True)
 
         hdr_validation_flags = self._build_hdr_validation_flags(events)
         headers_event.headers = self._process_received_headers(
@@ -1365,8 +1373,13 @@ class H2Stream:
             return
 
         content_length = None
+        # RFC 9113 section 8.1.1: 204/304 responses may advertise a
+        # nonzero representation length even though they have no content.
+        no_response_content = False
 
         for n, v in headers:
+            if n == b":status" and v in (b"204", b"304"):
+                no_response_content = True
             if n == b"content-length":
                 if not v.isdigit():
                     # https://www.rfc-editor.org/rfc/rfc9110.html#name-content-length
@@ -1385,7 +1398,7 @@ class H2Stream:
                     msg = f"Conflicting content-length headers: {content_length} and {parsed_content_length}"
                     raise ProtocolError(msg)
 
-        self._expected_content_length = content_length
+        self._expected_content_length = 0 if no_response_content else content_length
 
     def _track_content_length(self, length: int, end_stream: bool) -> None:
         """
