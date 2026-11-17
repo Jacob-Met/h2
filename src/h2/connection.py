@@ -29,7 +29,7 @@ from hyperframe.frame import (
     WindowUpdateFrame,
 )
 
-from .config import H2Configuration
+from .config import H2Configuration, HPACKDecoder
 from .errors import ErrorCodes, _error_code_from_int
 from .events import (
     AlternativeServiceAvailable,
@@ -327,17 +327,48 @@ class H2Connection:
         self.streams: dict[int, H2Stream] = {}
         self.highest_inbound_stream_id = 0
         self.highest_outbound_stream_id = 0
-        self.encoder = Encoder()
-        self.decoder = Decoder()
-
-        # This won't always actually do anything: for versions of HPACK older
-        # than 2.3.0 it does nothing. However, we have to try!
-        self.decoder.max_header_list_size = self.DEFAULT_MAX_HEADER_LIST_SIZE
-
         #: The configuration for this HTTP/2 connection object.
         #:
         #: .. versionadded:: 2.5.0
         self.config = config or H2Configuration(client_side=True)
+        # Keep the incumbent codec path lightweight. Alternative backends are
+        # checked once at construction, not on every header block.
+        custom_encoder = self.config.encoder_factory is not Encoder
+        custom_decoder = self.config.decoder_factory is not Decoder
+        if custom_encoder:
+            try:
+                self.encoder = self.config.encoder_factory()
+            except TypeError as e:
+                msg = "encoder_factory must be callable with no arguments"
+                raise TypeError(msg) from e
+            if (not callable(getattr(self.encoder, "encode", None)) or
+                    not hasattr(self.encoder, "header_table_size")):
+                msg = "encoder_factory must return an HPACK encoder with encode and header_table_size"
+                raise TypeError(msg)
+        else:
+            self.encoder = Encoder()
+
+        if custom_decoder:
+            try:
+                self.decoder = self.config.decoder_factory()
+            except TypeError as e:
+                msg = "decoder_factory must be callable with no arguments"
+                raise TypeError(msg) from e
+            if (not callable(getattr(self.decoder, "decode", None)) or
+                    not all(hasattr(self.decoder, attr) for attr in (
+                        "max_header_list_size", "max_allowed_table_size",
+                    ))):
+                msg = "decoder_factory must return an HPACK decoder with decode and both limits"
+                raise TypeError(msg)
+        else:
+            self.decoder = Decoder()
+
+        # Apply the HPACK decompression-bomb limit to every decoder, including
+        # implementations that start with different defaults.
+        self.decoder.max_header_list_size = self.DEFAULT_MAX_HEADER_LIST_SIZE
+        if custom_decoder and self.decoder.max_header_list_size != self.DEFAULT_MAX_HEADER_LIST_SIZE:
+            msg = "decoder_factory must enforce max_header_list_size"
+            raise ValueError(msg)
 
         # Objects that store settings, including defaults.
         #
@@ -361,6 +392,13 @@ class H2Connection:
             },
         )
         self.remote_settings = Settings(client=not self.config.client_side)
+        # Custom decoders may not have the same default table limit as hpack.
+        if custom_decoder:
+            allowed_table_size = self.local_settings.header_table_size
+            self.decoder.max_allowed_table_size = allowed_table_size
+            if self.decoder.max_allowed_table_size != allowed_table_size:
+                msg = "decoder_factory must enforce max_allowed_table_size"
+                raise ValueError(msg)
 
         # The current value of the connection flow control windows on the
         # connection.
@@ -2093,7 +2131,7 @@ def _add_frame_priority(frame: PriorityFrame | HeadersFrame,
     return frame
 
 
-def _decode_headers(decoder: Decoder, encoded_header_block: bytes) -> Iterable[Header]:
+def _decode_headers(decoder: HPACKDecoder, encoded_header_block: bytes) -> Iterable[Header]:
     """
     Decode a HPACK-encoded header block, translating HPACK exceptions into
     sensible h2 errors.

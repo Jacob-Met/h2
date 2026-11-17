@@ -323,3 +323,39 @@ a certain number of bytes have been freed up.
 
 For most applications, this method should be preferred to the manual flow
 control mechanism.
+
+
+Alternative HPACK implementations
+---------------------------------
+
+An HTTP/2 connection maintains independent HPACK encoder and decoder dynamic
+header tables. By default, :class:`h2.connection.H2Connection` uses the pure
+Python :class:`hpack.Encoder` and :class:`hpack.Decoder` implementations. To
+use a compatible optimized implementation without subclassing or modifying
+``H2Connection`` after initialization, pass **zero-argument factories** when
+creating the :class:`h2.config.H2Configuration`::
+
+    from h2.config import H2Configuration
+    from h2.connection import H2Connection
+    from my_hpack_backend import Encoder, Decoder
+
+    connection = H2Connection(H2Configuration(
+        encoder_factory=Encoder,
+        decoder_factory=Decoder,
+    ))
+
+The factories are called once per connection and must each return a fresh
+object. A compatible encoder must implement ``encode(headers, huffman=True)``
+and a writable ``header_table_size``. A compatible decoder must implement
+``decode(data, raw=True)`` and writable ``max_header_list_size`` and
+``max_allowed_table_size`` attributes. The methods must preserve normal
+``hpack`` exceptions for malformed header blocks and limit violations.
+
+**Security:** The decoder must *actually enforce* the configured decompressed
+header-list limit and HPACK dynamic-table limit. Merely exposing writable
+attributes is insufficient if a native implementation ignores them: such a
+backend is unsafe to deploy. An alternative implementation is responsible for
+preserving the RFC 7541 dynamic-table state, sensitive-header indexing flags,
+header tuple types, compression settings updates, and error semantics. h2
+checks the initial limits and refuses an implementation whose reported limits
+do not match; applications must test their specific backend's behaviour.

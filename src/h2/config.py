@@ -7,7 +7,35 @@ Objects for controlling the configuration of the HTTP/2 stack.
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
+
+from hpack.hpack import Decoder, Encoder
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable, Iterable
+
+    from hpack.struct import HeaderTuple, HeaderWeaklyTyped
+
+
+class HPACKEncoder(Protocol):
+    """Minimal interface required from a per-connection HPACK encoder."""
+
+    header_table_size: int
+
+    def encode(self, headers: Iterable[HeaderWeaklyTyped], huffman: bool = True) -> bytes:
+        """Encode one HTTP/2 header block, retaining the dynamic table."""
+        ...
+
+
+class HPACKDecoder(Protocol):
+    """Minimal interface required from a per-connection HPACK decoder."""
+
+    max_header_list_size: int
+    max_allowed_table_size: int
+
+    def decode(self, data: bytes, raw: bool = False) -> Iterable[HeaderTuple]:
+        """Decode one HTTP/2 header block, retaining the dynamic table."""
+        ...
 
 
 class _BooleanConfigOption:
@@ -149,6 +177,18 @@ class H2Configuration:
         .. versionadded:: 2.6.0
 
     :type logger: ``logging.Logger``
+
+    :param encoder_factory: Zero-argument callable creating a fresh HPACK
+        encoder for this connection. The default is :class:`hpack.Encoder`.
+        The returned encoder must support ``encode`` and a writable
+        ``header_table_size`` property. Never share an encoder between
+        connections: HPACK dynamic tables are connection-local.
+    :param decoder_factory: Zero-argument callable creating a fresh HPACK
+        decoder for this connection. The default is :class:`hpack.Decoder`.
+        The returned decoder must support ``decode``, a writable
+        ``max_header_list_size`` and ``max_allowed_table_size``. h2 always
+        configures its header-list and dynamic-table limits on the decoder;
+        the implementation must actually enforce them.
     """
 
     client_side = _BooleanConfigOption("client_side")
@@ -176,7 +216,9 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
-                 logger: DummyLogger | OutputLogger | None = None) -> None:
+                 logger: DummyLogger | OutputLogger | None = None,
+                 encoder_factory: Callable[[], HPACKEncoder] = Encoder,
+                 decoder_factory: Callable[[], HPACKDecoder] = Decoder) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
         self.validate_outbound_headers = validate_outbound_headers
@@ -185,6 +227,14 @@ class H2Configuration:
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
         self.logger = logger or DummyLogger(__name__)
+        if not callable(encoder_factory):
+            msg = "encoder_factory must be callable with no arguments"
+            raise TypeError(msg)
+        if not callable(decoder_factory):
+            msg = "decoder_factory must be callable with no arguments"
+            raise TypeError(msg)
+        self.encoder_factory = encoder_factory
+        self.decoder_factory = decoder_factory
 
     @property
     def header_encoding(self) -> bool | str | None:

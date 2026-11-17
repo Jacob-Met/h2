@@ -48,10 +48,9 @@ from .windows import WindowManager
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable, Generator, Iterable
 
-    from hpack.hpack import Encoder
     from hpack.struct import Header, HeaderWeaklyTyped
 
-    from .config import H2Configuration
+    from .config import H2Configuration, HPACKEncoder
 
 
 class StreamState(IntEnum):
@@ -857,7 +856,7 @@ class H2Stream:
 
     def send_headers(self,
                      headers: Iterable[HeaderWeaklyTyped],
-                     encoder: Encoder,
+                     encoder: HPACKEncoder,
                      end_stream: bool = False) -> list[HeadersFrame | ContinuationFrame | PushPromiseFrame]:
         """
         Returns a list of HEADERS/CONTINUATION frames to emit as either headers
@@ -913,7 +912,7 @@ class H2Stream:
     def push_stream_in_band(self,
                             related_stream_id: int,
                             headers: Iterable[HeaderWeaklyTyped],
-                            encoder: Encoder) -> list[HeadersFrame | ContinuationFrame | PushPromiseFrame]:
+                            encoder: HPACKEncoder) -> list[HeadersFrame | ContinuationFrame | PushPromiseFrame]:
         """
         Returns a list of PUSH_PROMISE/CONTINUATION frames to emit as a pushed
         stream header. Called on the stream that has the PUSH_PROMISE frame
@@ -1284,7 +1283,7 @@ class H2Stream:
 
     def _build_headers_frames(self,
                               headers: Iterable[Header],
-                              encoder: Encoder,
+                              encoder: HPACKEncoder,
                               first_frame: HeadersFrame | PushPromiseFrame,
                               hdr_validation_flags: HeaderValidationFlags) \
             -> list[HeadersFrame | ContinuationFrame | PushPromiseFrame]:
