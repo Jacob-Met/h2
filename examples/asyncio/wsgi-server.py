@@ -119,10 +119,48 @@ class H2Protocol(asyncio.Protocol):
         # ensure that we don't emit data from a WSGI application whose stream
         # has been cancelled.
         self._reset_streams = set()
+        self._closed = False
+
+        # A WSGI thread may be waiting for a header or DATA write when the
+        # stream is reset (or the transport disappears). Wake every such
+        # thread; clearing a buffered tuple alone leaves its writer blocked.
+        self._pending_events = {}
+        self._pending_lock = threading.Lock()
 
         # Keep track of the loop sending task so we can kill it when the
         # connection goes away.
         self._send_loop_task = None
+
+    def _new_write_event(self, stream_id) -> threading.Event:
+        event = threading.Event()
+        with self._pending_lock:
+            if self._closed or stream_id in self._reset_streams:
+                event.set()
+            else:
+                self._pending_events.setdefault(stream_id, set()).add(event)
+        return event
+
+    def _finish_write_event(self, stream_id, event) -> None:
+        with self._pending_lock:
+            pending = self._pending_events.get(stream_id)
+            if pending is not None:
+                pending.discard(event)
+                if not pending:
+                    del self._pending_events[stream_id]
+        event.set()
+
+    def _cancel_stream_writes(self, stream_id) -> None:
+        with self._pending_lock:
+            self._reset_streams.add(stream_id)
+            pending = self._pending_events.pop(stream_id, ())
+        for event in pending:
+            event.set()
+
+    def _retire_stream_if_done(self, stream_id) -> None:
+        stream = self.streams.get(stream_id)
+        if stream is not None and stream.request_ended and stream.response_ended:
+            del self.streams[stream_id]
+            self._reset_streams.discard(stream_id)
 
     def connection_made(self, transport):
         """
@@ -136,11 +174,20 @@ class H2Protocol(asyncio.Protocol):
         self._send_loop_task = self._loop.create_task(self.sending_loop())
 
     def connection_lost(self, exc):
-        """
-        With the end of the connection, we just want to cancel our data sending
-        coroutine.
-        """
-        self._send_loop_task.cancel()
+        """Release blocked WSGI writers and readers before stopping the loop."""
+        with self._pending_lock:
+            self._closed = True
+            pending = self._pending_events
+            self._pending_events = {}
+        for stream_events in pending.values():
+            for event in stream_events:
+                event.set()
+        for stream in self.streams.values():
+            stream.request_complete()
+        self.streams.clear()
+        self._flow_controlled_data.clear()
+        if self._send_loop_task is not None:
+            self._send_loop_task.cancel()
 
     def data_received(self, data):
         """
@@ -220,15 +267,25 @@ class H2Protocol(asyncio.Protocol):
             # If this stream got reset, just drop the data on the floor. Note
             # that we need to reset the event here to make sure that
             # application doesn't lock up.
-            if stream_id in self._reset_streams:
-                event.set()
+            if self._closed or stream_id in self._reset_streams:
+                self._finish_write_event(stream_id, event)
+                if data is END_DATA_SENTINEL:
+                    stream = self.streams.get(stream_id)
+                    if stream is not None:
+                        stream.response_ended = True
+                        self._retire_stream_if_done(stream_id)
+                continue
 
             # Check if the body is done. If it is, this is really easy! Again,
             # we *must* set the event here or the application will lock up.
             if data is END_DATA_SENTINEL:
                 self.conn.end_stream(stream_id)
                 self.transport.write(self.conn.data_to_send())
-                event.set()
+                stream = self.streams.get(stream_id)
+                if stream is not None:
+                    stream.response_ended = True
+                    self._retire_stream_if_done(stream_id)
+                self._finish_write_event(stream_id, event)
                 continue
 
             # We need to send data, but not to exceed the flow control window.
@@ -264,7 +321,7 @@ class H2Protocol(asyncio.Protocol):
                 )
             else:
                 # We sent everything. We can let the WSGI app progress.
-                event.set()
+                self._finish_write_event(stream_id, event)
 
     def request_received(self, event):
         """
@@ -306,8 +363,11 @@ class H2Protocol(asyncio.Protocol):
         """
         The stream data is complete.
         """
-        stream = self.streams[event.stream_id]
-        stream.request_complete()
+        stream = self.streams.get(event.stream_id)
+        if stream is not None:
+            stream.request_ended = True
+            stream.request_complete()
+            self._retire_stream_if_done(event.stream_id)
 
     def reset_stream(self, event):
         """
@@ -325,10 +385,10 @@ class H2Protocol(asyncio.Protocol):
         incoming, to ensure that it does not attempt to do further reads of the
         data.
         """
-        if event.stream_id in self._flow_controlled_data:
-            del self._flow_controlled_data[event.stream_id]
-
-        self._reset_streams.add(event.stream_id)
+        if event.stream_id not in self.streams:
+            return
+        self._flow_controlled_data.pop(event.stream_id, None)
+        self._cancel_stream_writes(event.stream_id)
         self.end_stream(event)
 
     def data_for_stream(self, stream_id, data):
@@ -339,11 +399,15 @@ class H2Protocol(asyncio.Protocol):
         Places data being written by a stream on an asyncio queue. Returns a
         threading event that will fire when that data is sent.
         """
-        event = threading.Event()
-        self._loop.call_soon_threadsafe(
-            self._stream_data.put_nowait,
-            (stream_id, data, event)
-        )
+        event = self._new_write_event(stream_id)
+        # The final sentinel must still reach the event-loop owner after a
+        # reset: the WSGI worker no longer needs to block, but the protocol
+        # still needs to retire its stream and reset marker.
+        if not event.is_set() or (data is END_DATA_SENTINEL and not self._closed):
+            self._loop.call_soon_threadsafe(
+                self._stream_data.put_nowait,
+                (stream_id, data, event)
+            )
         return event
 
     def send_response(self, stream_id, headers):
@@ -354,12 +418,17 @@ class H2Protocol(asyncio.Protocol):
         Returns a threading event that will fire when the headers have been
         emitted to the network.
         """
-        event = threading.Event()
+        event = self._new_write_event(stream_id)
+        if event.is_set():
+            return event
 
         def _inner_send(stream_id, headers, event):
-            self.conn.send_headers(stream_id, headers, end_stream=False)
-            self.transport.write(self.conn.data_to_send())
-            event.set()
+            try:
+                if not self._closed and stream_id not in self._reset_streams:
+                    self.conn.send_headers(stream_id, headers, end_stream=False)
+                    self.transport.write(self.conn.data_to_send())
+            finally:
+                self._finish_write_event(stream_id, event)
 
         self._loop.call_soon_threadsafe(
             _inner_send,
@@ -376,6 +445,8 @@ class H2Protocol(asyncio.Protocol):
         need to block on this action, it may take place at any time.
         """
         def _inner_open(stream_id, increment):
+            if self._closed or stream_id in self._reset_streams:
+                return
             self.conn.increment_flow_control_window(increment, stream_id)
             self.conn.increment_flow_control_window(increment, None)
             self.transport.write(self.conn.data_to_send())
@@ -426,6 +497,8 @@ class Stream:
         # Whether the application has received all the data from the network
         # or not. This allows us to short-circuit some reads.
         self._complete = False
+        self.request_ended = False
+        self.response_ended = False
 
     def receive_data(self, data, flow_controlled_size):
         """
