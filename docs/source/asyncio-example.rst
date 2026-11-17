@@ -7,7 +7,9 @@ basically just the same JSON-headers-returning server that was built in the
 :doc:`basic-usage` document.
 
 This example demonstrates some basic asyncio techniques. Repeated request header names
-are represented as arrays of their values; single-valued headers stay strings. A request body that
+are represented as arrays of their values; single-valued headers stay strings.
+Trailing request headers, when present, are echoed in ``trailers`` using the
+same format. A request body that
 is not valid UTF-8 is echoed in the JSON response as Base64 in ``body`` with
 ``body_encoding`` set to ``base64``; UTF-8 bodies keep the original text form.
 Request bodies larger than 1 MiB receive HTTP 413 without buffering the rest

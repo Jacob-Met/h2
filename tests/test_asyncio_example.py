@@ -231,3 +231,35 @@ def test_asyncio_example_preserves_repeated_header_values_in_echo():
         assert headers[":method"] == "POST"
 
     asyncio.run(exercise())
+
+
+def test_asyncio_example_echoes_request_trailers_and_repeated_values():
+    """An HTTP/2 request with trailers must not silently discard its metadata."""
+    import json
+
+    async def exercise():
+        protocol = _example_protocol()()
+        transport = MemoryTransport()
+        protocol.connection_made(transport)
+        client = h2.connection.H2Connection()
+        client.initiate_connection()
+        client.send_headers(1, _request(b"POST", b"/trailers"))
+        client.send_data(1, b"body with trailers")
+        client.send_headers(1, [
+            (b"x-checksum", b"abc"),
+            (b"x-tag", b"first"),
+            (b"x-tag", b"second"),
+        ], end_stream=True)
+        protocol.data_received(client.data_to_send())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        data = b"".join(
+            event.data for event in client.receive_data(bytes(transport.output))
+            if isinstance(event, h2.events.DataReceived)
+        )
+        response = json.loads(data)
+        assert response["body"] == "body with trailers"
+        assert response["trailers"] == {"x-checksum": "abc", "x-tag": ["first", "second"]}
+
+    asyncio.run(exercise())
