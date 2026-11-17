@@ -1216,8 +1216,9 @@ class H2Connection:
             additional_data=(additional_data or b""),
         )
         self._prepare_for_sending([f])
-        if graceful or self._local_goaway_last_stream_id is not None:
-            self._local_goaway_last_stream_id = last_stream_id
+        # Every GOAWAY constrains later ones, even when this close is
+        # immediate rather than graceful (RFC 9113 Section 6.8).
+        self._local_goaway_last_stream_id = last_stream_id
         if graceful:
             self.state_machine._start_draining(open_state)
 

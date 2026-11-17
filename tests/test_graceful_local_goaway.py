@@ -238,3 +238,22 @@ def test_protocol_error_goaway_cannot_expand_a_previous_local_boundary() -> None
     error_goaway.last_stream_id = 1
     error_goaway.error_code = ErrorCodes.PROTOCOL_ERROR
     assert server.data_to_send() == error_goaway.serialize()
+
+
+def test_repeated_terminal_goaway_must_not_reclaim_refused_requests() -> None:
+    """Non-graceful GOAWAY frames obey the same nonincreasing boundary rule."""
+    _, server = connected_pair()
+    server.close_connection(last_stream_id=0)
+    server.data_to_send()
+
+    with pytest.raises(ValueError, match="cannot increase"):
+        server.close_connection(last_stream_id=1)
+    assert not server.data_to_send()
+
+
+def test_repeated_terminal_goaway_can_lower_or_repeat_last_id() -> None:
+    """A peer can narrow its boundary when sending another terminal GOAWAY."""
+    _, server = connected_pair()
+    server.close_connection(last_stream_id=3)
+    server.close_connection(last_stream_id=1)
+    server.close_connection(last_stream_id=1)
