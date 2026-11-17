@@ -22,14 +22,27 @@ from h2.config import H2Configuration
 from h2.connection import H2Connection
 from h2.events import (
     ConnectionTerminated, DataReceived, RemoteSettingsChanged,
-    RequestReceived, StreamEnded, StreamReset, WindowUpdated
+    RequestReceived, StreamEnded, StreamReset, TrailersReceived, WindowUpdated
 )
 from h2.errors import ErrorCodes
 from h2.exceptions import ProtocolError, StreamClosedError
 from h2.settings import SettingCodes
 
 
-RequestData = collections.namedtuple('RequestData', ['headers', 'data'])
+RequestData = collections.namedtuple('RequestData', ['headers', 'data', 'trailers'])
+
+
+def header_values(headers):
+    """Preserve repeated HTTP field names instead of discarding their values."""
+    fields = collections.OrderedDict()
+    for name, value in headers:
+        if name not in fields:
+            fields[name] = value
+        elif isinstance(fields[name], list):
+            fields[name].append(value)
+        else:
+            fields[name] = [fields[name], value]
+    return fields
 
 
 class H2Protocol(asyncio.Protocol):
@@ -75,6 +88,8 @@ class H2Protocol(asyncio.Protocol):
                     self.receive_data(
                         event.data, event.flow_controlled_length, event.stream_id
                     )
+                elif isinstance(event, TrailersReceived):
+                    self.trailers_received(event.headers, event.stream_id)
                 elif isinstance(event, StreamEnded):
                     self.stream_complete(event.stream_id)
                 elif isinstance(event, ConnectionTerminated):
@@ -90,18 +105,13 @@ class H2Protocol(asyncio.Protocol):
                 self.transport.write(self.conn.data_to_send())
 
     def request_received(self, headers: List[Tuple[str, str]], stream_id: int):
-        # Unlike dict(headers), retain each value of repeated field names.
-        # Unique field names keep the original string-valued JSON shape.
-        header_values = collections.OrderedDict()
-        for name, value in headers:
-            if name not in header_values:
-                header_values[name] = value
-            elif isinstance(header_values[name], list):
-                header_values[name].append(value)
-            else:
-                header_values[name] = [header_values[name], value]
-        request_data = RequestData(header_values, io.BytesIO())
+        request_data = RequestData(header_values(headers), io.BytesIO(), collections.OrderedDict())
         self.stream_data[stream_id] = request_data
+
+    def trailers_received(self, headers: List[Tuple[str, str]], stream_id: int):
+        request_data = self.stream_data.get(stream_id)
+        if request_data is not None:
+            request_data.trailers.update(header_values(headers))
 
     def stream_complete(self, stream_id: int):
         """
@@ -117,6 +127,8 @@ class H2Protocol(asyncio.Protocol):
         headers = request_data.headers
         raw_body = request_data.data.getvalue()
         response = {"headers": headers}
+        if request_data.trailers:
+            response["trailers"] = request_data.trailers
         try:
             response["body"] = raw_body.decode('utf-8')
         except UnicodeDecodeError:
