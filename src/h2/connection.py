@@ -1747,7 +1747,12 @@ class H2Connection:
         GOAWAY frames.
         """
         f = GoAwayFrame(0)
-        f.last_stream_id = self.highest_inbound_stream_id
+        last_stream_id = self.highest_inbound_stream_id
+        if self._local_goaway_last_stream_id is not None:
+            # A previous GOAWAY may have already told the peer to retry
+            # streams above a lower boundary (RFC 9113 Section 6.8).
+            last_stream_id = min(last_stream_id, self._local_goaway_last_stream_id)
+        f.last_stream_id = last_stream_id
         f.error_code = error_code
         self.state_machine.process_input(ConnectionInputs.SEND_GOAWAY)
         self._prepare_for_sending([f])

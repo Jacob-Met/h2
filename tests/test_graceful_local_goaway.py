@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from hyperframe.frame import WindowUpdateFrame
+from hyperframe.frame import GoAwayFrame, WindowUpdateFrame
 
 from h2.config import H2Configuration
 from h2.connection import ConnectionState, H2Connection
@@ -216,3 +216,25 @@ def test_refused_reset_after_local_goaway_is_ignored() -> None:
     server.close_connection(graceful=True, last_stream_id=1)
     assert server.receive_data(client.data_to_send()) == []
     assert 3 not in server.streams
+
+
+def test_protocol_error_goaway_cannot_expand_a_previous_local_boundary() -> None:
+    """A later error must not reclaim requests already declared unprocessed."""
+    client, server = connected_pair()
+    client.send_headers(3, REQUEST, end_stream=True)
+    server.receive_data(client.data_to_send())
+    assert server.highest_inbound_stream_id == 3
+    server.clear_outbound_data_buffer()
+
+    server.close_connection(graceful=True, last_stream_id=1)
+    server.data_to_send()  # Send the initial GOAWAY before the error.
+
+    invalid_window = WindowUpdateFrame(0)
+    invalid_window.window_increment = 0
+    with pytest.raises(ProtocolError):
+        server.receive_data(invalid_window.serialize())
+
+    error_goaway = GoAwayFrame(0)
+    error_goaway.last_stream_id = 1
+    error_goaway.error_code = ErrorCodes.PROTOCOL_ERROR
+    assert server.data_to_send() == error_goaway.serialize()
