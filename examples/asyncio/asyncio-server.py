@@ -90,9 +90,17 @@ class H2Protocol(asyncio.Protocol):
                 self.transport.write(self.conn.data_to_send())
 
     def request_received(self, headers: List[Tuple[str, str]], stream_id: int):
-        headers = collections.OrderedDict(headers)
-        # Store off the request data.
-        request_data = RequestData(headers, io.BytesIO())
+        # Unlike dict(headers), retain each value of repeated field names.
+        # Unique field names keep the original string-valued JSON shape.
+        header_values = collections.OrderedDict()
+        for name, value in headers:
+            if name not in header_values:
+                header_values[name] = value
+            elif isinstance(header_values[name], list):
+                header_values[name].append(value)
+            else:
+                header_values[name] = [header_values[name], value]
+        request_data = RequestData(header_values, io.BytesIO())
         self.stream_data[stream_id] = request_data
 
     def stream_complete(self, stream_id: int):
